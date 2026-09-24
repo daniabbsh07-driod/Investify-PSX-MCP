@@ -43,7 +43,26 @@ def test_pypsx_connection() -> dict:
             "success": False,
             "error": str(e),
         }
+@mcp.tool()
+def test_pypsx_quote(symbol: str = "LUCK") -> dict:
+    """Test pyPSX market quote without changing the existing Yahoo quote tool."""
+    try:
+        symbol = symbol.upper().strip()
+        result = pypsx_client.get_quote(symbol)
 
+        return {
+            "success": True,
+            "symbol": symbol,
+            "data": result,
+            "source": "pyPSX",
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "symbol": symbol,
+            "error": str(e),
+            "source": "pyPSX",
+        }
 # ============================================================
 # YAHOO FINANCE DATA SOURCE
 # PSX symbols generally use .KA
