@@ -1,47 +1,120 @@
 from __future__ import annotations
-import math
+
+import time
 from typing import Any
+
 import requests
-from bs4 import BeautifulSoup
 from mcp.server.fastmcp import FastMCP
+
+
+# ============================================================
+# MCP SERVER
+# ============================================================
 
 mcp = FastMCP(
     "Investify-PSX-MCP",
     host="0.0.0.0",
     port=8000,
     stateless_http=True,
-    json_response=True
+    json_response=True,
 )
-BASE = "https://dps.psx.com.pk"
+
+
+# ============================================================
+# DATA SOURCE
+# Yahoo Finance uses .KA for Karachi Stock Exchange / PSX
+# Example: LUCK -> LUCK.KA
+# ============================================================
+
+YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart"
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0",
-    "X-Requested-With": "XMLHttpRequest",
-    "Accept": "application/json, text/javascript, */*; q=0.01",
-    "Referer": "https://dps.psx.com.pk/"
+    "Accept": "application/json,text/plain,*/*",
 }
 
-def _get_json(path: str) -> Any:
-    r = requests.get(BASE + path, headers=HEADERS, timeout=20)
-    r.raise_for_status()
-    return r.json()
 
-def _series(symbol: str):
+def _clean_symbol(symbol: str) -> str:
     symbol = symbol.upper().strip()
-    yahoo_symbol = f"{symbol}.KA"
 
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}"
+    if symbol.endswith(".KA"):
+        symbol = symbol[:-3]
+
+    return symbol
+
+
+def _yahoo_symbol(symbol: str) -> str:
+    return f"{_clean_symbol(symbol)}.KA"
+
+
+def _yahoo_chart(
+    symbol: str,
+    range_: str = "2y",
+    interval: str = "1d",
+) -> dict[str, Any]:
+
+    psx_symbol = _clean_symbol(symbol)
+    yahoo_symbol = _yahoo_symbol(psx_symbol)
+
+    url = f"{YAHOO_CHART_URL}/{yahoo_symbol}"
+
     params = {
-        "range": "2y",
-        "interval": "1d"
+        "range": range_,
+        "interval": interval,
+        "includePrePost": "false",
+        "events": "div,splits",
     }
 
-    r = requests.get(url, params=params, headers=HEADERS, timeout=20)
-    r.raise_for_status()
-    data = r.json()
+    r = requests.get(
+        url,
+        params=params,
+        headers=HEADERS,
+        timeout=25,
+    )
 
-    result = data["chart"]["result"][0]
+    r.raise_for_status()
+
+    payload = r.json()
+
+    chart = payload.get("chart", {})
+
+    if chart.get("error"):
+        raise ValueError(
+            f"Yahoo Finance error for {yahoo_symbol}: "
+            f"{chart['error']}"
+        )
+
+    results = chart.get("result")
+
+    if not results:
+        raise ValueError(
+            f"No Yahoo Finance data found for {yahoo_symbol}"
+        )
+
+    return results[0]
+
+
+# ============================================================
+# DAILY HISTORICAL SERIES
+# ============================================================
+
+def _series(symbol: str) -> list[dict[str, Any]]:
+
+    result = _yahoo_chart(
+        symbol,
+        range_="2y",
+        interval="1d",
+    )
+
     timestamps = result.get("timestamp", [])
-    quote = result["indicators"]["quote"][0]
+
+    indicators = result.get("indicators", {})
+    quote_list = indicators.get("quote", [])
+
+    if not quote_list:
+        return []
+
+    quote = quote_list[0]
 
     opens = quote.get("open", [])
     highs = quote.get("high", [])
@@ -49,124 +122,578 @@ def _series(symbol: str):
     closes = quote.get("close", [])
     volumes = quote.get("volume", [])
 
-    out = []
+    rows = []
 
     for i, ts in enumerate(timestamps):
+
         close = closes[i] if i < len(closes) else None
+
         if close is None:
             continue
 
-        out.append({
+        row = {
             "timestamp": ts,
-            "open": opens[i] if i < len(opens) else None,
-            "high": highs[i] if i < len(highs) else None,
-            "low": lows[i] if i < len(lows) else None,
+            "open": (
+                opens[i]
+                if i < len(opens)
+                else None
+            ),
+            "high": (
+                highs[i]
+                if i < len(highs)
+                else None
+            ),
+            "low": (
+                lows[i]
+                if i < len(lows)
+                else None
+            ),
             "close": float(close),
-            "volume": volumes[i] if i < len(volumes) else None
-        })
+            "volume": (
+                volumes[i]
+                if i < len(volumes)
+                else None
+            ),
+        }
 
-    return out
+        rows.append(row)
 
-def _ema(values, period):
+    return rows
+
+
+# ============================================================
+# INDICATORS
+# ============================================================
+
+def _sma(values: list[float], period: int):
+
+    if len(values) < period:
+        return None
+
+    return sum(values[-period:]) / period
+
+
+def _ema_series(values: list[float], period: int):
+
     if not values:
         return []
+
     k = 2 / (period + 1)
+
     result = [values[0]]
-    for v in values[1:]:
-        result.append(v * k + result[-1] * (1-k))
+
+    for value in values[1:]:
+
+        result.append(
+            value * k
+            + result[-1] * (1 - k)
+        )
+
     return result
 
-def _rsi(values, period=14):
+
+def _rsi(values: list[float], period: int = 14):
+
     if len(values) < period + 1:
         return None
-    gains, losses = [], []
-    for a,b in zip(values[:-1], values[1:]):
-        d=b-a
-        gains.append(max(d,0)); losses.append(max(-d,0))
-    avg_gain=sum(gains[:period])/period
-    avg_loss=sum(losses[:period])/period
+
+    gains = []
+    losses = []
+
+    for i in range(1, len(values)):
+
+        change = values[i] - values[i - 1]
+
+        gains.append(max(change, 0))
+        losses.append(max(-change, 0))
+
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+
     for i in range(period, len(gains)):
-        avg_gain=(avg_gain*(period-1)+gains[i])/period
-        avg_loss=(avg_loss*(period-1)+losses[i])/period
+
+        avg_gain = (
+            avg_gain * (period - 1)
+            + gains[i]
+        ) / period
+
+        avg_loss = (
+            avg_loss * (period - 1)
+            + losses[i]
+        ) / period
+
     if avg_loss == 0:
         return 100.0
-    rs=avg_gain/avg_loss
-    return 100-(100/(1+rs))
+
+    rs = avg_gain / avg_loss
+
+    return 100 - (100 / (1 + rs))
+
+
+def _macd_values(
+    values: list[float],
+    fast: int = 12,
+    slow: int = 26,
+    signal: int = 9,
+):
+
+    if len(values) < slow:
+        return None
+
+    fast_ema = _ema_series(values, fast)
+    slow_ema = _ema_series(values, slow)
+
+    macd_line = [
+        fast_ema[i] - slow_ema[i]
+        for i in range(len(values))
+    ]
+
+    signal_line = _ema_series(
+        macd_line,
+        signal,
+    )
+
+    macd = macd_line[-1]
+    signal_value = signal_line[-1]
+    histogram = macd - signal_value
+
+    return {
+        "macd": macd,
+        "signal": signal_value,
+        "histogram": histogram,
+    }
+
+
+# ============================================================
+# MCP TOOL — QUOTE
+# ============================================================
 
 @mcp.tool()
 def quote(symbol: str) -> dict:
-    """Latest PSX quote from market-watch."""
-    symbol=symbol.upper().strip()
-    r=requests.get(f"{BASE}/market-watch",headers=HEADERS,timeout=20)
-    r.raise_for_status()
-    soup=BeautifulSoup(r.text,"html.parser")
-    for tr in soup.select("tr"):
-        cells=[c.get_text(" ",strip=True) for c in tr.select("td")]
-        if cells and cells[0].upper()==symbol:
-            return {"symbol":symbol,"raw_columns":cells,"source":f"{BASE}/market-watch"}
-    return {"symbol":symbol,"error":"Symbol not found in current market-watch"}
+    """
+    Latest available PSX quote using Yahoo Finance .KA data.
+    """
+
+    symbol = _clean_symbol(symbol)
+
+    result = _yahoo_chart(
+        symbol,
+        range_="5d",
+        interval="1d",
+    )
+
+    meta = result.get("meta", {})
+
+    rows = []
+
+    timestamps = result.get("timestamp", [])
+    quote_list = (
+        result
+        .get("indicators", {})
+        .get("quote", [])
+    )
+
+    if quote_list:
+
+        q = quote_list[0]
+
+        closes = q.get("close", [])
+        opens = q.get("open", [])
+        highs = q.get("high", [])
+        lows = q.get("low", [])
+        volumes = q.get("volume", [])
+
+        for i, ts in enumerate(timestamps):
+
+            close = (
+                closes[i]
+                if i < len(closes)
+                else None
+            )
+
+            if close is None:
+                continue
+
+            rows.append({
+                "timestamp": ts,
+                "open": (
+                    opens[i]
+                    if i < len(opens)
+                    else None
+                ),
+                "high": (
+                    highs[i]
+                    if i < len(highs)
+                    else None
+                ),
+                "low": (
+                    lows[i]
+                    if i < len(lows)
+                    else None
+                ),
+                "close": close,
+                "volume": (
+                    volumes[i]
+                    if i < len(volumes)
+                    else None
+                ),
+            })
+
+    latest_bar = rows[-1] if rows else None
+
+    return {
+        "symbol": symbol,
+        "yahoo_symbol": _yahoo_symbol(symbol),
+        "name": meta.get("longName")
+        or meta.get("shortName"),
+        "exchange": meta.get("fullExchangeName")
+        or meta.get("exchangeName"),
+        "currency": meta.get("currency"),
+        "market_price": meta.get(
+            "regularMarketPrice"
+        ),
+        "previous_close": meta.get(
+            "chartPreviousClose"
+        )
+        or meta.get("previousClose"),
+        "market_time": meta.get(
+            "regularMarketTime"
+        ),
+        "latest_bar": latest_bar,
+        "source": "Yahoo Finance",
+    }
+
+
+# ============================================================
+# MCP TOOL — HISTORY
+# ============================================================
 
 @mcp.tool()
-def history(symbol: str, limit: int = 250) -> dict:
-    """End-of-day PSX history. Default last 250 observations."""
-    rows=_series(symbol)
-    return {"symbol":symbol.upper(),"count":min(limit,len(rows)),
-            "data":rows[-limit:],"source":f"{BASE}/timeseries/eod/{symbol.upper()}"}
+def history(
+    symbol: str,
+    limit: int = 250,
+) -> dict:
+    """
+    PSX daily historical OHLCV.
+    """
+
+    symbol = _clean_symbol(symbol)
+
+    rows = _series(symbol)
+
+    if limit < 1:
+        limit = 1
+
+    selected = rows[-limit:]
+
+    return {
+        "symbol": symbol,
+        "yahoo_symbol": _yahoo_symbol(symbol),
+        "count": len(selected),
+        "data": selected,
+        "source": "Yahoo Finance",
+    }
+
+
+# ============================================================
+# MCP TOOL — INTRADAY
+# ============================================================
 
 @mcp.tool()
 def intraday(symbol: str) -> dict:
-    """Intraday PSX time-series."""
-    symbol=symbol.upper().strip()
-    return {"symbol":symbol,"data":_get_json(f"/timeseries/int/{symbol}"),
-            "source":f"{BASE}/timeseries/int/{symbol}"}
+    """
+    Recent PSX intraday data.
+    Yahoo 5-minute bars are used.
+    """
+
+    symbol = _clean_symbol(symbol)
+
+    result = _yahoo_chart(
+        symbol,
+        range_="5d",
+        interval="5m",
+    )
+
+    timestamps = result.get("timestamp", [])
+
+    quote_list = (
+        result
+        .get("indicators", {})
+        .get("quote", [])
+    )
+
+    if not quote_list:
+
+        return {
+            "symbol": symbol,
+            "count": 0,
+            "data": [],
+            "source": "Yahoo Finance",
+        }
+
+    q = quote_list[0]
+
+    opens = q.get("open", [])
+    highs = q.get("high", [])
+    lows = q.get("low", [])
+    closes = q.get("close", [])
+    volumes = q.get("volume", [])
+
+    rows = []
+
+    for i, ts in enumerate(timestamps):
+
+        close = (
+            closes[i]
+            if i < len(closes)
+            else None
+        )
+
+        if close is None:
+            continue
+
+        rows.append({
+            "timestamp": ts,
+            "open": (
+                opens[i]
+                if i < len(opens)
+                else None
+            ),
+            "high": (
+                highs[i]
+                if i < len(highs)
+                else None
+            ),
+            "low": (
+                lows[i]
+                if i < len(lows)
+                else None
+            ),
+            "close": close,
+            "volume": (
+                volumes[i]
+                if i < len(volumes)
+                else None
+            ),
+        })
+
+    return {
+        "symbol": symbol,
+        "yahoo_symbol": _yahoo_symbol(symbol),
+        "interval": "5m",
+        "count": len(rows),
+        "data": rows,
+        "source": "Yahoo Finance",
+    }
+
+
+# ============================================================
+# MCP TOOL — RSI
+# ============================================================
 
 @mcp.tool()
-def rsi(symbol: str, period: int = 14) -> dict:
-    """Calculate RSI from PSX end-of-day closing prices."""
-    rows=_series(symbol); vals=[x["close"] for x in rows]
-    value=_rsi(vals,period)
-    return {"symbol":symbol.upper(),"period":period,
-            "rsi":None if value is None else round(value,2),
-            "last_close": vals[-1] if vals else None,
-            "observations":len(vals)}
+def rsi(
+    symbol: str,
+    period: int = 14,
+) -> dict:
+
+    symbol = _clean_symbol(symbol)
+
+    rows = _series(symbol)
+
+    closes = [
+        row["close"]
+        for row in rows
+        if row.get("close") is not None
+    ]
+
+    value = _rsi(
+        closes,
+        period,
+    )
+
+    return {
+        "symbol": symbol,
+        "period": period,
+        "rsi": value,
+        "last_close": (
+            closes[-1]
+            if closes
+            else None
+        ),
+        "source": "Yahoo Finance",
+    }
+
+
+# ============================================================
+# MCP TOOL — MACD
+# ============================================================
 
 @mcp.tool()
-def macd(symbol: str, fast: int = 12, slow: int = 26, signal: int = 9) -> dict:
-    """Calculate MACD, signal line and histogram from PSX EOD closes."""
-    rows=_series(symbol); vals=[x["close"] for x in rows]
-    if len(vals) < slow + signal:
-        return {"symbol":symbol.upper(),"error":"Not enough observations"}
-    ef=_ema(vals,fast); es=_ema(vals,slow)
-    line=[a-b for a,b in zip(ef,es)]
-    sig=_ema(line,signal)
-    hist=line[-1]-sig[-1]
-    return {"symbol":symbol.upper(),"macd":round(line[-1],4),
-            "signal":round(sig[-1],4),"histogram":round(hist,4),
-            "fast":fast,"slow":slow,"signal_period":signal,
-            "last_close":vals[-1]}
+def macd(
+    symbol: str,
+    fast: int = 12,
+    slow: int = 26,
+    signal: int = 9,
+) -> dict:
+
+    symbol = _clean_symbol(symbol)
+
+    rows = _series(symbol)
+
+    closes = [
+        row["close"]
+        for row in rows
+        if row.get("close") is not None
+    ]
+
+    result = _macd_values(
+        closes,
+        fast,
+        slow,
+        signal,
+    )
+
+    return {
+        "symbol": symbol,
+        "fast": fast,
+        "slow": slow,
+        "signal_period": signal,
+        "values": result,
+        "last_close": (
+            closes[-1]
+            if closes
+            else None
+        ),
+        "source": "Yahoo Finance",
+    }
+
+
+# ============================================================
+# MCP TOOL — TECHNICALS
+# ============================================================
 
 @mcp.tool()
 def technicals(symbol: str) -> dict:
-    """Compact technical snapshot: RSI(14), MACD(12,26,9), SMA20, SMA50, SMA200."""
-    rows=_series(symbol); vals=[x["close"] for x in rows]
-    def sma(n):
-        return round(sum(vals[-n:])/n,4) if len(vals)>=n else None
-    rv=_rsi(vals,14)
-    ef=_ema(vals,12); es=_ema(vals,26)
-    ml=[a-b for a,b in zip(ef,es)] if vals else []
-    sl=_ema(ml,9) if ml else []
-    return {"symbol":symbol.upper(),"last_close":vals[-1] if vals else None,
-            "rsi14":round(rv,2) if rv is not None else None,
-            "macd":round(ml[-1],4) if ml else None,
-            "macd_signal":round(sl[-1],4) if sl else None,
-            "macd_histogram":round(ml[-1]-sl[-1],4) if ml and sl else None,
-            "sma20":sma(20),"sma50":sma(50),"sma200":sma(200)}
+
+    symbol = _clean_symbol(symbol)
+
+    rows = _series(symbol)
+
+    closes = [
+        row["close"]
+        for row in rows
+        if row.get("close") is not None
+    ]
+
+    if not closes:
+
+        return {
+            "symbol": symbol,
+            "error": "No historical data available",
+        }
+
+    return {
+        "symbol": symbol,
+        "last_close": closes[-1],
+
+        "rsi14": _rsi(
+            closes,
+            14,
+        ),
+
+        "macd": _macd_values(
+            closes,
+            12,
+            26,
+            9,
+        ),
+
+        "sma20": _sma(
+            closes,
+            20,
+        ),
+
+        "sma50": _sma(
+            closes,
+            50,
+        ),
+
+        "sma200": _sma(
+            closes,
+            200,
+        ),
+
+        "observations": len(closes),
+
+        "source": "Yahoo Finance",
+    }
+
+
+# ============================================================
+# MCP TOOL — ANALYZE STOCK
+# ============================================================
 
 @mcp.tool()
 def analyze_stock(symbol: str) -> dict:
-    """One-call PSX technical dataset for AI analysis. Not investment advice."""
-    return {"quote":quote(symbol),"technicals":technicals(symbol),
-            "recent_history":history(symbol,60)}
+    """
+    Returns factual technical measurements.
+    It does not provide guaranteed buy/sell advice.
+    """
+
+    symbol = _clean_symbol(symbol)
+
+    rows = _series(symbol)
+
+    closes = [
+        row["close"]
+        for row in rows
+        if row.get("close") is not None
+    ]
+
+    if not closes:
+
+        return {
+            "symbol": symbol,
+            "error": "No historical data available",
+        }
+
+    current = closes[-1]
+
+    rsi14 = _rsi(
+        closes,
+        14,
+    )
+
+    macd_data = _macd_values(
+        closes,
+        12,
+        26,
+        9,
+    )
+
+    sma20 = _sma(closes, 20)
+    sma50 = _sma(closes, 50)
+    sma200 = _sma(closes, 200)
+
+    return {
+        "symbol": symbol,
+        "current_price": current,
+        "rsi14": rsi14,
+        "macd": macd_data,
+        "sma20": sma20,
+        "sma50": sma50,
+        "sma200": sma200,
+        "source": "Yahoo Finance",
+        "generated_at_unix": int(time.time()),
+    }
+
+
+# ============================================================
+# START MCP SERVER
+# ============================================================
 
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http")
+    mcp.run(
+        transport="streamable-http"
+    )
