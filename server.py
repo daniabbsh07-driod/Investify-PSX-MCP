@@ -13,7 +13,12 @@ mcp = FastMCP(
     json_response=True
 )
 BASE = "https://dps.psx.com.pk"
-HEADERS = {"User-Agent": "Mozilla/5.0 Investify-PSX-MCP/1.0"}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "X-Requested-With": "XMLHttpRequest",
+    "Accept": "application/json, text/javascript, */*; q=0.01",
+    "Referer": "https://dps.psx.com.pk/"
+}
 
 def _get_json(path: str) -> Any:
     r = requests.get(BASE + path, headers=HEADERS, timeout=20)
