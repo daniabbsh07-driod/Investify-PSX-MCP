@@ -63,6 +63,241 @@ def test_pypsx_quote(symbol: str = "LUCK") -> dict:
             "error": str(e),
             "source": "pyPSX",
         }
+        @mcp.tool()
+def pypsx_quote(symbol: str) -> dict:
+    """Current pyPSX market snapshot. Updates every few seconds during market hours."""
+    symbol = symbol.upper().strip()
+    try:
+        data = pypsx_client.get_quote(symbol)
+        return {
+            "success": True,
+            "symbol": symbol,
+            "data": data,
+            "is_realtime": True,
+            "source": "pyPSX",
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "symbol": symbol,
+            "error": str(e),
+            "source": "pyPSX",
+        }
+
+
+@mcp.tool()
+def pypsx_history(
+    symbol: str,
+    start: str | None = None,
+    end: str | None = None,
+    limit: int = 250,
+) -> dict:
+    """Daily PSX OHLCV history from pyPSX."""
+    symbol = symbol.upper().strip()
+    try:
+        bars = pypsx_client.get_historical(
+            symbol,
+            start=start,
+            end=end,
+        )
+
+        if limit < 1:
+            limit = 1
+
+        bars = bars[-limit:]
+
+        return {
+            "success": True,
+            "symbol": symbol,
+            "interval": "1d",
+            "count": len(bars),
+            "data": bars,
+            "source": "pyPSX",
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "symbol": symbol,
+            "error": str(e),
+            "source": "pyPSX",
+        }
+
+
+@mcp.tool()
+def pypsx_intraday(
+    symbol: str,
+    days: int = 2,
+) -> dict:
+    """Latest 1-minute PSX OHLCV candles from pyPSX."""
+    symbol = symbol.upper().strip()
+
+    if days < 1:
+        days = 1
+    if days > 2:
+        days = 2
+
+    try:
+        candles = pypsx_client.get_intraday(
+            symbol,
+            days=days,
+        )
+
+        return {
+            "success": True,
+            "symbol": symbol,
+            "days": days,
+            "interval": "1m",
+            "count": len(candles),
+            "data": candles,
+            "source": "pyPSX",
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "symbol": symbol,
+            "error": str(e),
+            "source": "pyPSX",
+        }
+
+
+@mcp.tool()
+def pypsx_historical_intraday(
+    symbol: str,
+    start: str,
+    end: str,
+    interval: str = "5m",
+) -> dict:
+    """Historical intraday PSX candles: 1m, 5m, 15m or 1h."""
+    symbol = symbol.upper().strip()
+    interval = interval.lower().strip()
+
+    if interval not in {"1m", "5m", "15m", "1h"}:
+        return {
+            "success": False,
+            "symbol": symbol,
+            "error": "interval must be 1m, 5m, 15m or 1h",
+            "source": "pyPSX",
+        }
+
+    try:
+        data = pypsx_client.get_historical_intraday(
+            [symbol],
+            start=start,
+            end=end,
+            interval=interval,
+        )
+
+        return {
+            "success": True,
+            "symbol": symbol,
+            "interval": interval,
+            "data": data,
+            "source": "pyPSX",
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "symbol": symbol,
+            "error": str(e),
+            "source": "pyPSX",
+        }
+
+
+@mcp.tool()
+def pypsx_recent_trades(
+    symbol: str,
+    limit: int = 20,
+) -> dict:
+    """Recent PSX trade ticks."""
+    symbol = symbol.upper().strip()
+
+    if limit < 1:
+        limit = 1
+    if limit > 100:
+        limit = 100
+
+    try:
+        trades = pypsx_client.get_recent_trades(
+            symbol,
+            limit=limit,
+        )
+
+        return {
+            "success": True,
+            "symbol": symbol,
+            "count": len(trades),
+            "data": trades,
+            "source": "pyPSX",
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "symbol": symbol,
+            "error": str(e),
+            "source": "pyPSX",
+        }
+
+
+@mcp.tool()
+def pypsx_fundamentals(symbol: str) -> dict:
+    """PSX fundamentals available from pyPSX."""
+    symbol = symbol.upper().strip()
+
+    try:
+        data = pypsx_client.get_fundamentals(symbol)
+
+        return {
+            "success": True,
+            "symbol": symbol,
+            "data": data,
+            "source": "pyPSX",
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "symbol": symbol,
+            "error": str(e),
+            "source": "pyPSX",
+        }
+
+
+@mcp.tool()
+def pypsx_full_snapshot(symbol: str) -> dict:
+    """Combined current quote, recent 1m candles, trades and fundamentals."""
+    symbol = symbol.upper().strip()
+
+    result = {
+        "symbol": symbol,
+        "source": "pyPSX",
+    }
+
+    try:
+        result["quote"] = pypsx_client.get_quote(symbol)
+    except Exception as e:
+        result["quote_error"] = str(e)
+
+    try:
+        result["intraday_1m"] = pypsx_client.get_intraday(
+            symbol,
+            days=2,
+        )
+    except Exception as e:
+        result["intraday_error"] = str(e)
+
+    try:
+        result["recent_trades"] = pypsx_client.get_recent_trades(
+            symbol,
+            limit=20,
+        )
+    except Exception as e:
+        result["recent_trades_error"] = str(e)
+
+    try:
+        result["fundamentals"] = pypsx_client.get_fundamentals(symbol)
+    except Exception as e:
+        result["fundamentals_error"] = str(e)
+
+    return result
 # ============================================================
 # YAHOO FINANCE DATA SOURCE
 # PSX symbols generally use .KA
