@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import time
+import os
 from typing import Any
 
 import requests
 from mcp.server.fastmcp import FastMCP
-
+from pypsx import TradingClient
 
 # ============================================================
 # MCP SERVER
@@ -18,7 +19,30 @@ mcp = FastMCP(
     stateless_http=True,
     json_response=True,
 )
+PYPSX_API_KEY = os.getenv("PYPSX_API_KEY")
+PYPSX_SECRET_KEY = os.getenv("PYPSX_SECRET_KEY")
 
+pypsx_client = TradingClient(
+    api_key=PYPSX_API_KEY,
+    secret_key=PYPSX_SECRET_KEY,
+    paper=True,
+)
+
+@mcp.tool()
+def test_pypsx_connection() -> dict:
+    """Test pyPSX authentication without exposing credentials."""
+    try:
+        account = pypsx_client.get_account()
+        return {
+            "success": True,
+            "message": "pyPSX connection successful",
+            "account": str(account),
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+        }
 
 # ============================================================
 # YAHOO FINANCE DATA SOURCE
