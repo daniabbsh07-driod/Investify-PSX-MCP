@@ -63,7 +63,7 @@ def test_pypsx_quote(symbol: str = "LUCK") -> dict:
             "error": str(e),
             "source": "pyPSX",
         }
-        @mcp.tool()
+@mcp.tool()
 def pypsx_quote(symbol: str) -> dict:
     """Current pyPSX market snapshot. Updates every few seconds during market hours."""
     symbol = symbol.upper().strip()
