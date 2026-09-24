@@ -21,8 +21,8 @@ mcp = FastMCP(
 
 
 # ============================================================
-# DATA SOURCE
-# Yahoo Finance uses .KA for Karachi Stock Exchange / PSX
+# YAHOO FINANCE DATA SOURCE
+# PSX symbols generally use .KA
 # Example: LUCK -> LUCK.KA
 # ============================================================
 
@@ -53,8 +53,8 @@ def _yahoo_chart(
     interval: str = "1d",
 ) -> dict[str, Any]:
 
-    psx_symbol = _clean_symbol(symbol)
-    yahoo_symbol = _yahoo_symbol(psx_symbol)
+    symbol = _clean_symbol(symbol)
+    yahoo_symbol = _yahoo_symbol(symbol)
 
     url = f"{YAHOO_CHART_URL}/{yahoo_symbol}"
 
@@ -65,16 +65,16 @@ def _yahoo_chart(
         "events": "div,splits",
     }
 
-    r = requests.get(
+    response = requests.get(
         url,
         params=params,
         headers=HEADERS,
         timeout=25,
     )
 
-    r.raise_for_status()
+    response.raise_for_status()
 
-    payload = r.json()
+    payload = response.json()
 
     chart = payload.get("chart", {})
 
@@ -108,31 +108,38 @@ def _series(symbol: str) -> list[dict[str, Any]]:
 
     timestamps = result.get("timestamp", [])
 
-    indicators = result.get("indicators", {})
-    quote_list = indicators.get("quote", [])
+    quote_list = (
+        result
+        .get("indicators", {})
+        .get("quote", [])
+    )
 
     if not quote_list:
         return []
 
-    quote = quote_list[0]
+    quote_data = quote_list[0]
 
-    opens = quote.get("open", [])
-    highs = quote.get("high", [])
-    lows = quote.get("low", [])
-    closes = quote.get("close", [])
-    volumes = quote.get("volume", [])
+    opens = quote_data.get("open", [])
+    highs = quote_data.get("high", [])
+    lows = quote_data.get("low", [])
+    closes = quote_data.get("close", [])
+    volumes = quote_data.get("volume", [])
 
     rows = []
 
-    for i, ts in enumerate(timestamps):
+    for i, timestamp in enumerate(timestamps):
 
-        close = closes[i] if i < len(closes) else None
+        close = (
+            closes[i]
+            if i < len(closes)
+            else None
+        )
 
         if close is None:
             continue
 
-        row = {
-            "timestamp": ts,
+        rows.append({
+            "timestamp": timestamp,
             "open": (
                 opens[i]
                 if i < len(opens)
@@ -154,45 +161,56 @@ def _series(symbol: str) -> list[dict[str, Any]]:
                 if i < len(volumes)
                 else None
             ),
-        }
-
-        rows.append(row)
+        })
 
     return rows
 
 
 # ============================================================
-# INDICATORS
+# INDICATOR FUNCTIONS
 # ============================================================
 
 def _sma(values: list[float], period: int):
 
-    if len(values) < period:
+    if period <= 0 or len(values) < period:
         return None
 
     return sum(values[-period:]) / period
 
 
-def _ema_series(values: list[float], period: int):
+def _ema_series(
+    values: list[float],
+    period: int,
+):
 
-    if not values:
+    if not values or period <= 0:
         return []
 
-    k = 2 / (period + 1)
+    multiplier = 2 / (period + 1)
 
-    result = [values[0]]
+    ema_values = [values[0]]
 
     for value in values[1:]:
 
-        result.append(
-            value * k
-            + result[-1] * (1 - k)
+        previous = ema_values[-1]
+
+        ema = (
+            value * multiplier
+            + previous * (1 - multiplier)
         )
 
-    return result
+        ema_values.append(ema)
+
+    return ema_values
 
 
-def _rsi(values: list[float], period: int = 14):
+def _rsi(
+    values: list[float],
+    period: int = 14,
+):
+
+    if period <= 0:
+        return None
 
     if len(values) < period + 1:
         return None
@@ -213,16 +231,20 @@ def _rsi(values: list[float], period: int = 14):
     for i in range(period, len(gains)):
 
         avg_gain = (
-            avg_gain * (period - 1)
+            (avg_gain * (period - 1))
             + gains[i]
         ) / period
 
         avg_loss = (
-            avg_loss * (period - 1)
+            (avg_loss * (period - 1))
             + losses[i]
         ) / period
 
     if avg_loss == 0:
+
+        if avg_gain == 0:
+            return 50.0
+
         return 100.0
 
     rs = avg_gain / avg_loss
@@ -237,11 +259,26 @@ def _macd_values(
     signal: int = 9,
 ):
 
+    if (
+        fast <= 0
+        or slow <= 0
+        or signal <= 0
+        or fast >= slow
+    ):
+        return None
+
     if len(values) < slow:
         return None
 
-    fast_ema = _ema_series(values, fast)
-    slow_ema = _ema_series(values, slow)
+    fast_ema = _ema_series(
+        values,
+        fast,
+    )
+
+    slow_ema = _ema_series(
+        values,
+        slow,
+    )
 
     macd_line = [
         fast_ema[i] - slow_ema[i]
@@ -253,119 +290,110 @@ def _macd_values(
         signal,
     )
 
-    macd = macd_line[-1]
+    if not signal_line:
+        return None
+
+    macd_value = macd_line[-1]
     signal_value = signal_line[-1]
-    histogram = macd - signal_value
 
     return {
-        "macd": macd,
+        "macd": macd_value,
         "signal": signal_value,
-        "histogram": histogram,
+        "histogram": (
+            macd_value - signal_value
+        ),
     }
 
 
 # ============================================================
-# MCP TOOL — QUOTE
+# MCP TOOL: QUOTE
 # ============================================================
 
 @mcp.tool()
 def quote(symbol: str) -> dict:
     """
-    Latest available PSX quote using Yahoo Finance .KA data.
+    Return the latest available verified daily OHLCV bar.
+
+    Important:
+    This is NOT advertised as a live real-time PSX quote.
+    Yahoo Finance meta regularMarketPrice is intentionally
+    not used because it may be stale/inconsistent for PSX.
     """
 
     symbol = _clean_symbol(symbol)
 
-    result = _yahoo_chart(
-        symbol,
-        range_="5d",
-        interval="1d",
+    rows = _series(symbol)
+
+    if not rows:
+
+        return {
+            "symbol": symbol,
+            "yahoo_symbol": _yahoo_symbol(symbol),
+            "error": "No daily market data available",
+            "source": "Yahoo Finance",
+        }
+
+    latest = rows[-1]
+
+    previous = (
+        rows[-2]
+        if len(rows) >= 2
+        else None
     )
 
-    meta = result.get("meta", {})
+    latest_close = latest.get("close")
 
-    rows = []
-
-    timestamps = result.get("timestamp", [])
-    quote_list = (
-        result
-        .get("indicators", {})
-        .get("quote", [])
+    previous_close = (
+        previous.get("close")
+        if previous
+        else None
     )
 
-    if quote_list:
+    change = None
+    change_percent = None
 
-        q = quote_list[0]
+    if (
+        latest_close is not None
+        and previous_close is not None
+    ):
 
-        closes = q.get("close", [])
-        opens = q.get("open", [])
-        highs = q.get("high", [])
-        lows = q.get("low", [])
-        volumes = q.get("volume", [])
+        change = latest_close - previous_close
 
-        for i, ts in enumerate(timestamps):
-
-            close = (
-                closes[i]
-                if i < len(closes)
-                else None
-            )
-
-            if close is None:
-                continue
-
-            rows.append({
-                "timestamp": ts,
-                "open": (
-                    opens[i]
-                    if i < len(opens)
-                    else None
-                ),
-                "high": (
-                    highs[i]
-                    if i < len(highs)
-                    else None
-                ),
-                "low": (
-                    lows[i]
-                    if i < len(lows)
-                    else None
-                ),
-                "close": close,
-                "volume": (
-                    volumes[i]
-                    if i < len(volumes)
-                    else None
-                ),
-            })
-
-    latest_bar = rows[-1] if rows else None
+        if previous_close != 0:
+            change_percent = (
+                change / previous_close
+            ) * 100
 
     return {
         "symbol": symbol,
         "yahoo_symbol": _yahoo_symbol(symbol),
-        "name": meta.get("longName")
-        or meta.get("shortName"),
-        "exchange": meta.get("fullExchangeName")
-        or meta.get("exchangeName"),
-        "currency": meta.get("currency"),
-        "market_price": meta.get(
-            "regularMarketPrice"
-        ),
-        "previous_close": meta.get(
-            "chartPreviousClose"
-        )
-        or meta.get("previousClose"),
-        "market_time": meta.get(
-            "regularMarketTime"
-        ),
-        "latest_bar": latest_bar,
+
+        "latest_close": latest_close,
+
+        "previous_close": previous_close,
+
+        "change": change,
+
+        "change_percent": change_percent,
+
+        "timestamp": latest.get("timestamp"),
+
+        "open": latest.get("open"),
+        "high": latest.get("high"),
+        "low": latest.get("low"),
+        "close": latest_close,
+        "volume": latest.get("volume"),
+
+        "quote_type": "latest_available_daily_bar",
+
+        "is_realtime": False,
+
         "source": "Yahoo Finance",
     }
 
 
 # ============================================================
-# MCP TOOL — HISTORY
+# MCP TOOL: HISTORY
 # ============================================================
 
 @mcp.tool()
@@ -374,7 +402,7 @@ def history(
     limit: int = 250,
 ) -> dict:
     """
-    PSX daily historical OHLCV.
+    Return daily historical OHLCV data.
     """
 
     symbol = _clean_symbol(symbol)
@@ -389,6 +417,7 @@ def history(
     return {
         "symbol": symbol,
         "yahoo_symbol": _yahoo_symbol(symbol),
+        "interval": "1d",
         "count": len(selected),
         "data": selected,
         "source": "Yahoo Finance",
@@ -396,99 +425,41 @@ def history(
 
 
 # ============================================================
-# MCP TOOL — INTRADAY
+# MCP TOOL: INTRADAY
 # ============================================================
 
 @mcp.tool()
 def intraday(symbol: str) -> dict:
     """
-    Recent PSX intraday data.
-    Yahoo 5-minute bars are used.
+    Intraday is deliberately disabled.
+
+    Yahoo Finance was observed returning daily PSX bars even
+    when a 5-minute interval was requested. Returning those
+    bars as intraday would be misleading.
     """
 
     symbol = _clean_symbol(symbol)
 
-    result = _yahoo_chart(
-        symbol,
-        range_="5d",
-        interval="5m",
-    )
-
-    timestamps = result.get("timestamp", [])
-
-    quote_list = (
-        result
-        .get("indicators", {})
-        .get("quote", [])
-    )
-
-    if not quote_list:
-
-        return {
-            "symbol": symbol,
-            "count": 0,
-            "data": [],
-            "source": "Yahoo Finance",
-        }
-
-    q = quote_list[0]
-
-    opens = q.get("open", [])
-    highs = q.get("high", [])
-    lows = q.get("low", [])
-    closes = q.get("close", [])
-    volumes = q.get("volume", [])
-
-    rows = []
-
-    for i, ts in enumerate(timestamps):
-
-        close = (
-            closes[i]
-            if i < len(closes)
-            else None
-        )
-
-        if close is None:
-            continue
-
-        rows.append({
-            "timestamp": ts,
-            "open": (
-                opens[i]
-                if i < len(opens)
-                else None
-            ),
-            "high": (
-                highs[i]
-                if i < len(highs)
-                else None
-            ),
-            "low": (
-                lows[i]
-                if i < len(lows)
-                else None
-            ),
-            "close": close,
-            "volume": (
-                volumes[i]
-                if i < len(volumes)
-                else None
-            ),
-        })
-
     return {
         "symbol": symbol,
         "yahoo_symbol": _yahoo_symbol(symbol),
-        "interval": "5m",
-        "count": len(rows),
-        "data": rows,
-        "source": "Yahoo Finance",
+
+        "available": False,
+
+        "data": [],
+
+        "message": (
+            "Reliable PSX intraday data is currently unavailable "
+            "from the configured source. Daily bars are not being "
+            "misrepresented as intraday data."
+        ),
+
+        "source": None,
     }
 
 
 # ============================================================
-# MCP TOOL — RSI
+# MCP TOOL: RSI
 # ============================================================
 
 @mcp.tool()
@@ -516,17 +487,21 @@ def rsi(
         "symbol": symbol,
         "period": period,
         "rsi": value,
+
         "last_close": (
             closes[-1]
             if closes
             else None
         ),
+
+        "observations": len(closes),
+
         "source": "Yahoo Finance",
     }
 
 
 # ============================================================
-# MCP TOOL — MACD
+# MCP TOOL: MACD
 # ============================================================
 
 @mcp.tool()
@@ -547,7 +522,7 @@ def macd(
         if row.get("close") is not None
     ]
 
-    result = _macd_values(
+    values = _macd_values(
         closes,
         fast,
         slow,
@@ -556,21 +531,27 @@ def macd(
 
     return {
         "symbol": symbol,
+
         "fast": fast,
         "slow": slow,
         "signal_period": signal,
-        "values": result,
+
+        "values": values,
+
         "last_close": (
             closes[-1]
             if closes
             else None
         ),
+
+        "observations": len(closes),
+
         "source": "Yahoo Finance",
     }
 
 
 # ============================================================
-# MCP TOOL — TECHNICALS
+# MCP TOOL: TECHNICALS
 # ============================================================
 
 @mcp.tool()
@@ -595,6 +576,7 @@ def technicals(symbol: str) -> dict:
 
     return {
         "symbol": symbol,
+
         "last_close": closes[-1],
 
         "rsi14": _rsi(
@@ -631,14 +613,16 @@ def technicals(symbol: str) -> dict:
 
 
 # ============================================================
-# MCP TOOL — ANALYZE STOCK
+# MCP TOOL: ANALYZE STOCK
 # ============================================================
 
 @mcp.tool()
 def analyze_stock(symbol: str) -> dict:
     """
-    Returns factual technical measurements.
-    It does not provide guaranteed buy/sell advice.
+    Return factual technical measurements.
+
+    This tool does not claim guaranteed profit
+    or guaranteed future price movement.
     """
 
     symbol = _clean_symbol(symbol)
@@ -660,37 +644,54 @@ def analyze_stock(symbol: str) -> dict:
 
     current = closes[-1]
 
-    rsi14 = _rsi(
-        closes,
-        14,
-    )
-
-    macd_data = _macd_values(
-        closes,
-        12,
-        26,
-        9,
-    )
-
-    sma20 = _sma(closes, 20)
-    sma50 = _sma(closes, 50)
-    sma200 = _sma(closes, 200)
-
     return {
         "symbol": symbol,
-        "current_price": current,
-        "rsi14": rsi14,
-        "macd": macd_data,
-        "sma20": sma20,
-        "sma50": sma50,
-        "sma200": sma200,
+
+        "last_available_close": current,
+
+        "rsi14": _rsi(
+            closes,
+            14,
+        ),
+
+        "macd": _macd_values(
+            closes,
+            12,
+            26,
+            9,
+        ),
+
+        "sma20": _sma(
+            closes,
+            20,
+        ),
+
+        "sma50": _sma(
+            closes,
+            50,
+        ),
+
+        "sma200": _sma(
+            closes,
+            200,
+        ),
+
+        "observations": len(closes),
+
+        "data_type": "daily",
+
+        "is_realtime": False,
+
         "source": "Yahoo Finance",
-        "generated_at_unix": int(time.time()),
+
+        "generated_at_unix": int(
+            time.time()
+        ),
     }
 
 
 # ============================================================
-# START MCP SERVER
+# START SERVER
 # ============================================================
 
 if __name__ == "__main__":
