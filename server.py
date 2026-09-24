@@ -27,25 +27,44 @@ def _get_json(path: str) -> Any:
 
 def _series(symbol: str):
     symbol = symbol.upper().strip()
-    data = _get_json(f"/timeseries/eod/{symbol}")
-    rows = data.get("data", data) if isinstance(data, dict) else data
+    yahoo_symbol = f"{symbol}.KA"
+
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}"
+    params = {
+        "range": "2y",
+        "interval": "1d"
+    }
+
+    r = requests.get(url, params=params, headers=HEADERS, timeout=20)
+    r.raise_for_status()
+    data = r.json()
+
+    result = data["chart"]["result"][0]
+    timestamps = result.get("timestamp", [])
+    quote = result["indicators"]["quote"][0]
+
+    opens = quote.get("open", [])
+    highs = quote.get("high", [])
+    lows = quote.get("low", [])
+    closes = quote.get("close", [])
+    volumes = quote.get("volume", [])
+
     out = []
-    for row in rows:
-        if isinstance(row, dict):
-            ts = row.get("time") or row.get("timestamp") or row.get("date")
-            close = row.get("close") or row.get("price")
-            volume = row.get("volume")
-            open_ = row.get("open")
-        else:
-            # PSX EOD commonly returns [timestamp, close, volume, open]
-            ts = row[0] if len(row) > 0 else None
-            close = row[1] if len(row) > 1 else None
-            volume = row[2] if len(row) > 2 else None
-            open_ = row[3] if len(row) > 3 else None
-        if close is not None:
-            out.append({"timestamp": ts, "close": float(close),
-                        "volume": volume, "open": open_})
-    out.sort(key=lambda x: x["timestamp"] if x["timestamp"] is not None else 0)
+
+    for i, ts in enumerate(timestamps):
+        close = closes[i] if i < len(closes) else None
+        if close is None:
+            continue
+
+        out.append({
+            "timestamp": ts,
+            "open": opens[i] if i < len(opens) else None,
+            "high": highs[i] if i < len(highs) else None,
+            "low": lows[i] if i < len(lows) else None,
+            "close": float(close),
+            "volume": volumes[i] if i < len(volumes) else None
+        })
+
     return out
 
 def _ema(values, period):
