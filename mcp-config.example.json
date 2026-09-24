@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "investify-psx": {
+      "command": "python",
+      "args": [
+        "/ABSOLUTE/PATH/Investify-PSX-MCP/server.py"
+      ]
+    }
+  }
+}
